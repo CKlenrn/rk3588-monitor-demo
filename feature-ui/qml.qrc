@@ -1,0 +1,17 @@
+<RCC>
+    <qresource prefix="/">
+        <file>qml/main.qml</file>
+        <file>qml/MonitorButton.qml</file>
+        <file>assets/icons/camera.svg</file>
+        <file>assets/icons/chart-no-axes-combined.svg</file>
+        <file>assets/icons/circle.svg</file>
+        <file>assets/icons/focus.svg</file>
+        <file>assets/icons/frame.svg</file>
+        <file>assets/icons/grid-3x3.svg</file>
+        <file>assets/icons/maximize.svg</file>
+        <file>assets/icons/palette.svg</file>
+        <file>assets/icons/scan-line.svg</file>
+        <file>assets/icons/settings.svg</file>
+        <file>assets/icons/zoom-in.svg</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,108 @@
+#!/bin/sh
+
+set -eu
+
+init_dir=/etc/init.d
+config_dir=/etc/monitor_demo
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "run as root from the serial console" >&2
+    exit 77
+fi
+for marker in serial-rescue manual-ui isolated-weston; do
+    if [ ! -f "$config_dir/validation/$marker.pass" ]; then
+        echo "missing validation marker: $marker" >&2
+        exit 65
+    fi
+done
+if [ ! -x /opt/monitor_demo/current/monitor_demo ]; then
+    echo "current monitor_demo release is not executable" >&2
+    exit 66
+fi
+if [ ! -f "$init_dir/S49weston" ] || [ ! -f "$init_dir/S50systemui" ]; then
+    echo "original startup scripts are not in their enabled state" >&2
+    exit 66
+fi
+if [ -e "$init_dir/K49weston" ] || [ -e "$init_dir/K50systemui" ]; then
+    echo "conflicting K-prefixed original startup script already exists" >&2
+    exit 73
+fi
+if [ -e "$init_dir/S49monitor_weston" ] || [ -e "$init_dir/S50monitor_demo" ]; then
+    echo "monitor startup scripts are already enabled" >&2
+    exit 73
+fi
+
+baseline_id="$(cat /opt/monitor_demo/baselines/current)"
+baseline="/opt/monitor_demo/baselines/$baseline_id/original"
+cmp -s "$init_dir/S49weston" "$baseline/S49weston" || {
+    echo "S49weston changed after baseline" >&2
+    exit 65
+}
+cmp -s "$init_dir/S50systemui" "$baseline/S50systemui" || {
+    echo "S50systemui changed after baseline" >&2
+    exit 65
+}
+cmp -s /etc/xdg/weston/weston.ini "$baseline/weston.ini" || {
+    echo "original weston.ini changed after baseline" >&2
+    exit 65
+}
+
+pending_weston="$init_dir/.S49monitor_weston.pending.$$"
+pending_app="$init_dir/.S50monitor_demo.pending.$$"
+
+rollback_names()
+{
+    if [ -f "$init_dir/S49monitor_weston" ] && [ ! -e "$init_dir/K49monitor_weston" ]; then
+        mv "$init_dir/S49monitor_weston" "$init_dir/K49monitor_weston"
+    fi
+    if [ -f "$init_dir/S50monitor_demo" ] && [ ! -e "$init_dir/K50monitor_demo" ]; then
+        mv "$init_dir/S50monitor_demo" "$init_dir/K50monitor_demo"
+    fi
+    if [ -f "$pending_weston" ] && [ ! -e "$init_dir/K49monitor_weston" ]; then
+        mv "$pending_weston" "$init_dir/K49monitor_weston"
+    fi
+    if [ -f "$pending_app" ] && [ ! -e "$init_dir/K50monitor_demo" ]; then
+        mv "$pending_app" "$init_dir/K50monitor_demo"
+    fi
+    if [ -f "$init_dir/K49weston" ] && [ ! -e "$init_dir/S49weston" ]; then
+        mv "$init_dir/K49weston" "$init_dir/S49weston"
+    fi
+    if [ -f "$init_dir/K50systemui" ] && [ ! -e "$init_dir/S50systemui" ]; then
+        mv "$init_dir/K50systemui" "$init_dir/S50systemui"
+    fi
+    rm -f "$pending_weston" "$pending_app"
+}
+trap rollback_names EXIT INT TERM
+
+if [ -e "$init_dir/K49monitor_weston" ] || [ -e "$init_dir/K50monitor_demo" ]; then
+    if [ ! -f "$init_dir/K49monitor_weston" ] \
+            || [ ! -f "$init_dir/K50monitor_demo" ]; then
+        echo "disabled monitor startup scripts are incomplete" >&2
+        exit 73
+    fi
+    cmp -s "$init_dir/K49monitor_weston" \
+           "$config_dir/staged-init/S49monitor_weston" || {
+        echo "disabled monitor weston script differs from staged version" >&2
+        exit 65
+    }
+    cmp -s "$init_dir/K50monitor_demo" \
+           "$config_dir/staged-init/S50monitor_demo" || {
+        echo "disabled monitor app script differs from staged version" >&2
+        exit 65
+    }
+    mv "$init_dir/K49monitor_weston" "$pending_weston"
+    mv "$init_dir/K50monitor_demo" "$pending_app"
+else
+    cp "$config_dir/staged-init/S49monitor_weston" "$pending_weston"
+    cp "$config_dir/staged-init/S50monitor_demo" "$pending_app"
+fi
+chmod 0755 "$pending_weston" "$pending_app"
+
+mv "$init_dir/S49weston" "$init_dir/K49weston"
+mv "$init_dir/S50systemui" "$init_dir/K50systemui"
+mv "$pending_weston" "$init_dir/S49monitor_weston"
+mv "$pending_app" "$init_dir/S50monitor_demo"
+sync
+trap - EXIT INT TERM
+
+echo "monitor boot chain enabled; reboot from the serial console to test it"

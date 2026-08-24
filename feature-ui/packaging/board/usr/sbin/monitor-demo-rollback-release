@@ -1,0 +1,130 @@
+#!/bin/sh
+
+set -eu
+
+root=/opt/monitor_demo
+if [ "$(id -u)" -ne 0 ]; then
+    echo "run as root" >&2
+    exit 77
+fi
+
+is_process()
+{
+    pid_file="$1"
+    expected="$2"
+    [ -r "$pid_file" ] || return 1
+    pid="$(cat "$pid_file")"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr '\000' ' ' <"/proc/$pid/cmdline" | grep -F "$expected" >/dev/null 2>&1
+}
+
+if is_process /run/monitor-demo-supervisor.pid /usr/libexec/monitor-demo-supervisor \
+        || is_process /run/monitor-demo.pid /opt/monitor_demo/current/monitor_demo; then
+    echo "monitor_demo is running; stop it before rolling back a release" >&2
+    exit 75
+fi
+if [ ! -L "$root/current" ] || [ ! -L "$root/previous" ]; then
+    echo "both current and previous release links are required" >&2
+    exit 66
+fi
+
+current_target="$(readlink "$root/current")"
+previous_target="$(readlink "$root/previous")"
+case "$current_target:$previous_target" in
+    releases/*:releases/*) ;;
+    *)
+        echo "release links do not point below releases/" >&2
+        exit 65
+        ;;
+esac
+if [ ! -x "$root/$previous_target/monitor_demo" ]; then
+    echo "previous release is not executable: $previous_target" >&2
+    exit 66
+fi
+
+next_current="$root/.current.$$"
+next_previous="$root/.previous.$$"
+restore_current="$root/.restore-current.$$"
+restore_previous="$root/.restore-previous.$$"
+
+link_cleanup()
+{
+    rm -f "$next_current" "$next_previous" \
+          "$restore_current" "$restore_previous"
+}
+
+restore_link()
+{
+    link_path="$1"
+    link_target="$2"
+    restore_temporary="$3"
+
+    rm -f "$restore_temporary" || return 1
+    ln -s "$link_target" "$restore_temporary" || return 1
+    mv -Tf "$restore_temporary" "$link_path" || return 1
+}
+
+link_value()
+{
+    if [ -L "$1" ]; then
+        readlink "$1" 2>/dev/null || printf '%s\n' unreadable
+    else
+        printf '%s\n' absent
+    fi
+}
+
+fail_rollback()
+{
+    failure_reason="$1"
+    trap '' INT TERM
+    failed_current="$(link_value "$root/current")"
+    failed_previous="$(link_value "$root/previous")"
+    echo "release rollback failed: $failure_reason" >&2
+    echo "failed current=$failed_current" >&2
+    echo "failed previous=$failed_previous" >&2
+
+    restore_failed=0
+    restore_link "$root/current" "$current_target" "$restore_current" \
+        || restore_failed=1
+    restore_link "$root/previous" "$previous_target" "$restore_previous" \
+        || restore_failed=1
+
+    echo "current=$(link_value "$root/current")" >&2
+    echo "previous=$(link_value "$root/previous")" >&2
+    if [ "$restore_failed" -eq 0 ]; then
+        echo "original release links restored; retry is safe" >&2
+    else
+        echo "automatic recovery incomplete; inspect both links before retrying" >&2
+    fi
+    exit 74
+}
+
+trap link_cleanup EXIT
+trap 'fail_rollback "interrupted by INT"' INT
+trap 'fail_rollback "interrupted by TERM"' TERM
+
+if ! ln -s "$previous_target" "$next_current"; then
+    fail_rollback "cannot create temporary current link"
+fi
+if ! ln -s "$current_target" "$next_previous"; then
+    fail_rollback "cannot create temporary previous link"
+fi
+if ! mv -Tf "$next_current" "$root/current"; then
+    fail_rollback "cannot replace current link"
+fi
+if ! mv -Tf "$next_previous" "$root/previous"; then
+    fail_rollback "cannot replace previous link"
+fi
+
+actual_current="$(readlink "$root/current" 2>/dev/null || true)"
+actual_previous="$(readlink "$root/previous" 2>/dev/null || true)"
+if [ "$actual_current" != "$previous_target" ] \
+        || [ "$actual_previous" != "$current_target" ]; then
+    fail_rollback "link verification mismatch"
+fi
+link_cleanup
+trap - EXIT INT TERM
+
+echo "current=$previous_target"
+echo "previous=$current_target"

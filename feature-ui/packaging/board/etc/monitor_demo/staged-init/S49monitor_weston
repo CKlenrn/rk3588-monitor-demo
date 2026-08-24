@@ -1,0 +1,112 @@
+#!/bin/sh
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+PID_FILE=/run/monitor-demo-weston.pid
+LOG_FILE=/var/log/monitor-demo-weston.log
+CONFIG_FILE=/etc/monitor_demo/weston.ini
+WESTON_BIN=/usr/bin/weston
+
+. /etc/profile
+
+SOCKET_FILE="${XDG_RUNTIME_DIR:-/run}/wayland-0"
+LOCK_FILE="${SOCKET_FILE}.lock"
+
+is_monitor_weston()
+{
+    [ -r "$PID_FILE" ] || return 1
+    pid="$(cat "$PID_FILE")"
+    [ -n "$pid" ] || return 1
+    [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$WESTON_BIN" ]
+}
+
+cleanup_stale_runtime()
+{
+    ! pgrep -x weston >/dev/null 2>&1 || return 1
+    rm -f "$PID_FILE" "$SOCKET_FILE" "$LOCK_FILE"
+}
+
+start_monitor_weston()
+{
+    if is_monitor_weston; then
+        return 0
+    fi
+
+    if pgrep -x weston >/dev/null 2>&1; then
+        echo "another weston process is already running" >&2
+        return 1
+    fi
+
+    cleanup_stale_runtime
+    # The video helper has an empty input region. Removing kiosk-shell's
+    # input-capturing background lets touch events reach and activate Qt.
+    env -u WESTON_DISABLE_ATOMIC -u WESTON_DRM_MIRROR \
+        WESTON_ALLOW_GBM_MODIFIERS=1 WESTON_NO_BACKGROUND=1 \
+        "$WESTON_BIN" --config="$CONFIG_FILE" \
+        >>"$LOG_FILE" 2>&1 &
+    pid=$!
+    echo "$pid" >"$PID_FILE"
+
+    counter=0
+    while [ ! -S "$SOCKET_FILE" ] && [ "$counter" -lt 50 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            cleanup_stale_runtime || true
+            echo "monitor weston exited during startup" >&2
+            return 1
+        fi
+        sleep 0.1
+        counter=$((counter + 1))
+    done
+
+    if [ ! -S "$SOCKET_FILE" ]; then
+        echo "monitor weston did not publish wayland-0" >&2
+        stop_monitor_weston
+        return 1
+    fi
+}
+
+stop_monitor_weston()
+{
+    if ! is_monitor_weston; then
+        cleanup_stale_runtime || true
+        return 0
+    fi
+
+    pid="$(cat "$PID_FILE")"
+    kill "$pid" 2>/dev/null || true
+    counter=0
+    while kill -0 "$pid" 2>/dev/null && [ "$counter" -lt 50 ]; do
+        sleep 0.1
+        counter=$((counter + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null \
+            && [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$WESTON_BIN" ]; then
+        kill -KILL "$pid" 2>/dev/null || true
+        counter=0
+        while kill -0 "$pid" 2>/dev/null && [ "$counter" -lt 50 ]; do
+            sleep 0.1
+            counter=$((counter + 1))
+        done
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "monitor weston did not stop" >&2
+        return 1
+    fi
+    cleanup_stale_runtime
+}
+
+case "$1" in
+    start)
+        start_monitor_weston
+        ;;
+    stop)
+        stop_monitor_weston
+        ;;
+    restart|reload)
+        stop_monitor_weston
+        start_monitor_weston
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac

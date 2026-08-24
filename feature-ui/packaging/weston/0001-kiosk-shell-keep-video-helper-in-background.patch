@@ -1,0 +1,67 @@
+diff --git a/kiosk-shell/kiosk-shell.c b/kiosk-shell/kiosk-shell.c
+--- a/kiosk-shell/kiosk-shell.c
++++ b/kiosk-shell/kiosk-shell.c
+@@ -50,6 +50,17 @@ get_kiosk_shell_surface(struct weston_surface *surface)
+ 	return NULL;
+ }
+ 
++static bool
++kiosk_shell_surface_is_video_background(struct kiosk_shell_surface *shsurf)
++{
++	const char *app_id =
++		weston_desktop_surface_get_app_id(shsurf->desktop_surface);
++
++	return app_id &&
++		strcmp(app_id,
++		       "org.freedesktop.weston.simple-dmabuf-v4l") == 0;
++}
++
+ static void
+ kiosk_shell_seat_handle_destroy(struct wl_listener *listener, void *data);
+ 
+@@ -894,7 +905,8 @@ find_focus_successor(struct kiosk_shell_surface *shsurf,
+ 				continue;
+ 
+ 			view_shsurf = get_kiosk_shell_surface(view->surface);
+-			if (!view_shsurf)
++			if (!view_shsurf ||
++			    kiosk_shell_surface_is_video_background(view_shsurf))
+ 				continue;
+ 
+ 			if (!top_view)
+@@ -989,6 +1001,7 @@ desktop_surface_committed(struct weston_desktop_surface *desktop_surface,
+ 		weston_desktop_surface_get_app_id(desktop_surface);
+ 	bool is_resized;
+ 	bool is_fullscreen;
++	bool is_video_background;
+ 
+ 	assert(shsurf);
+ 
+@@ -1023,6 +1036,7 @@ desktop_surface_committed(struct weston_desktop_surface *desktop_surface,
+ 		     surface->height != shsurf->last_height;
+ 	is_fullscreen = weston_desktop_surface_get_maximized(desktop_surface) ||
+ 			weston_desktop_surface_get_fullscreen(desktop_surface);
++	is_video_background = kiosk_shell_surface_is_video_background(shsurf);
+ 
+ 	if (!weston_surface_is_mapped(surface) || (is_resized && is_fullscreen)) {
+ 		if (is_fullscreen || !shsurf->xwayland.is_set) {
+@@ -1058,11 +1072,16 @@ desktop_surface_committed(struct weston_desktop_surface *desktop_surface,
+ 		/* We are mapping a new surface tree root; set it active,
+ 		 * replacing the previous one */
+ 		if (!shsurf->parent) {
+-			kiosk_shell_output_set_active_surface_tree(shoutput,
+-								   shsurf);
++			if (is_video_background)
++				weston_view_move_to_layer(
++					shsurf->view,
++					&shsurf->shell->normal_layer.view_list);
++			else
++				kiosk_shell_output_set_active_surface_tree(shoutput,
++								   shsurf);
+ 		}
+ 
+-		if (seat && kiosk_seat)
++		if (seat && kiosk_seat && !is_video_background)
+ 			kiosk_shell_surface_activate(shsurf, kiosk_seat,
+ 						     WESTON_ACTIVATE_FLAG_NONE);
+ 	}

@@ -1,0 +1,25 @@
+# Local build products
+**/Makefile
+**/.qmake.stash
+**/*.o
+**/moc_*.cpp
+**/moc_*.h
+**/qrc_*.cpp
+**/v4l2_wayland_explicit_sync
+build/
+
+# External SDKs and libraries are not redistributed
+vendor/
+third_party/sony-crsdk/
+*.so
+*.a
+*.bin
+
+# Local state and credentials
+.env*
+*.pem
+*.key
+id_*
+*.log
+core
+core.*

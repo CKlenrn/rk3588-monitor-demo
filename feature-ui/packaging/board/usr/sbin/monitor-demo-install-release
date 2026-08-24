@@ -1,0 +1,256 @@
+#!/bin/sh
+
+set -eu
+
+version="${1:-}"
+binary="${2:-}"
+helper="${3:-}"
+sony_sdk="${4:-}"
+case "$version" in
+    ""|*[!A-Za-z0-9._-]*)
+        echo "usage: monitor-demo-install-release VERSION BINARY HELPER [SONY_SDK_DIR]" >&2
+        exit 64
+        ;;
+esac
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+    echo "usage: monitor-demo-install-release VERSION BINARY HELPER [SONY_SDK_DIR]" >&2
+    exit 64
+fi
+if [ "$(id -u)" -ne 0 ]; then
+    echo "run as root" >&2
+    exit 77
+fi
+
+is_process()
+{
+    pid_file="$1"
+    expected="$2"
+    [ -r "$pid_file" ] || return 1
+    pid="$(cat "$pid_file")"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr '\000' ' ' <"/proc/$pid/cmdline" | grep -F "$expected" >/dev/null 2>&1
+}
+
+if is_process /run/monitor-demo-supervisor.pid /usr/libexec/monitor-demo-supervisor \
+        || is_process /run/monitor-demo.pid /opt/monitor_demo/current/monitor_demo; then
+    echo "monitor_demo is running; stop it before installing a release" >&2
+    exit 75
+fi
+if [ ! -f "$binary" ] || [ ! -x "$binary" ]; then
+    echo "binary is missing or not executable: $binary" >&2
+    exit 66
+fi
+if ! LC_ALL=C file "$binary" | grep -q 'ARM aarch64'; then
+    echo "binary is not AArch64" >&2
+    exit 65
+fi
+if [ ! -f "$helper" ] || [ ! -x "$helper" ]; then
+    echo "low-latency helper is missing or not executable: $helper" >&2
+    exit 66
+fi
+if ! LC_ALL=C file "$helper" | grep -q 'ARM aarch64'; then
+    echo "low-latency helper is not AArch64" >&2
+    exit 65
+fi
+if [ -n "$sony_sdk" ]; then
+    for library in \
+        libCr_Core.so \
+        libmonitor_protocol.so \
+        libmonitor_protocol_pf.so \
+        CrAdapter/libCr_PTP_USB.so \
+        CrAdapter/libCr_PTP_IP.so \
+        CrAdapter/libusb-1.0.so \
+        CrAdapter/libssh2.so; do
+        if [ ! -f "$sony_sdk/$library" ]; then
+            echo "Sony SDK library is missing: $sony_sdk/$library" >&2
+            exit 66
+        fi
+        if ! LC_ALL=C file "$sony_sdk/$library" | grep -q 'ARM aarch64'; then
+            echo "Sony SDK library is not AArch64: $sony_sdk/$library" >&2
+            exit 65
+        fi
+    done
+fi
+
+root=/opt/monitor_demo
+release="$root/releases/$version"
+temporary="$root/releases/.${version}.tmp.$$"
+if [ -e "$root/current" ] && [ ! -L "$root/current" ]; then
+    echo "$root/current exists and is not a symbolic link" >&2
+    exit 73
+fi
+if [ -e "$root/previous" ] && [ ! -L "$root/previous" ]; then
+    echo "$root/previous exists and is not a symbolic link" >&2
+    exit 73
+fi
+if [ -e "$release" ]; then
+    echo "release already exists: $release" >&2
+    exit 73
+fi
+
+mkdir -p "$root/releases" "$temporary"
+cleanup()
+{
+    rm -f "$temporary/monitor_demo" \
+          "$temporary/v4l2_wayland_explicit_sync" \
+          "$temporary/SHA256SUMS" \
+          "$temporary/libCr_Core.so" \
+          "$temporary/libmonitor_protocol.so" \
+          "$temporary/libmonitor_protocol_pf.so" \
+          "$temporary/CrAdapter/libCr_PTP_USB.so" \
+          "$temporary/CrAdapter/libCr_PTP_IP.so" \
+          "$temporary/CrAdapter/libusb-1.0.so" \
+          "$temporary/CrAdapter/libssh2.so"
+    rmdir "$temporary/CrAdapter" 2>/dev/null || true
+    rmdir "$temporary" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+cp "$binary" "$temporary/monitor_demo"
+cp "$helper" "$temporary/v4l2_wayland_explicit_sync"
+chmod 0755 "$temporary/monitor_demo" \
+           "$temporary/v4l2_wayland_explicit_sync"
+set -- monitor_demo v4l2_wayland_explicit_sync
+if [ -n "$sony_sdk" ]; then
+    mkdir "$temporary/CrAdapter"
+    cp "$sony_sdk/libCr_Core.so" \
+       "$sony_sdk/libmonitor_protocol.so" \
+       "$sony_sdk/libmonitor_protocol_pf.so" "$temporary/"
+    cp "$sony_sdk/CrAdapter/libCr_PTP_USB.so" \
+       "$sony_sdk/CrAdapter/libCr_PTP_IP.so" \
+       "$sony_sdk/CrAdapter/libusb-1.0.so" \
+       "$sony_sdk/CrAdapter/libssh2.so" "$temporary/CrAdapter/"
+    set -- "$@" libCr_Core.so libmonitor_protocol.so \
+        libmonitor_protocol_pf.so \
+        CrAdapter/libCr_PTP_USB.so CrAdapter/libCr_PTP_IP.so \
+        CrAdapter/libusb-1.0.so CrAdapter/libssh2.so
+fi
+cd "$temporary"
+sha256sum "$@" > SHA256SUMS
+cd /
+mv "$temporary" "$release"
+trap - EXIT
+
+next_link="$root/.current.$$"
+previous_link="$root/.previous.$$"
+restore_current_link="$root/.restore-current.$$"
+restore_previous_link="$root/.restore-previous.$$"
+
+had_current=0
+old_current_target=
+if [ -L "$root/current" ]; then
+    had_current=1
+    old_current_target="$(readlink "$root/current")"
+fi
+had_previous=0
+old_previous_target=
+if [ -L "$root/previous" ]; then
+    had_previous=1
+    old_previous_target="$(readlink "$root/previous")"
+fi
+
+link_cleanup()
+{
+    rm -f "$next_link" "$previous_link" \
+          "$restore_current_link" "$restore_previous_link"
+}
+
+restore_link()
+{
+    link_path="$1"
+    link_existed="$2"
+    link_target="$3"
+    restore_temporary="$4"
+
+    rm -f "$restore_temporary" || return 1
+    if [ "$link_existed" -eq 1 ]; then
+        ln -s "$link_target" "$restore_temporary" || return 1
+        mv -Tf "$restore_temporary" "$link_path" || return 1
+    else
+        rm -f "$link_path" || return 1
+    fi
+}
+
+remove_new_release()
+{
+    rm -f "$release/monitor_demo" \
+          "$release/v4l2_wayland_explicit_sync" \
+          "$release/SHA256SUMS" \
+          "$release/libCr_Core.so" \
+          "$release/libmonitor_protocol.so" \
+          "$release/libmonitor_protocol_pf.so" \
+          "$release/CrAdapter/libCr_PTP_USB.so" \
+          "$release/CrAdapter/libCr_PTP_IP.so" \
+          "$release/CrAdapter/libusb-1.0.so" \
+          "$release/CrAdapter/libssh2.so" || return 1
+    if [ -d "$release/CrAdapter" ]; then
+        rmdir "$release/CrAdapter" 2>/dev/null || return 1
+    fi
+    rmdir "$release" 2>/dev/null || return 1
+}
+
+link_value()
+{
+    if [ -L "$1" ]; then
+        readlink "$1" 2>/dev/null || printf '%s\n' unreadable
+    else
+        printf '%s\n' absent
+    fi
+}
+
+fail_link_switch()
+{
+    failure_reason="$1"
+    trap '' INT TERM
+    echo "release link switch failed: $failure_reason" >&2
+    restore_failed=0
+    restore_link "$root/current" "$had_current" "$old_current_target" \
+                 "$restore_current_link" || restore_failed=1
+    restore_link "$root/previous" "$had_previous" "$old_previous_target" \
+                 "$restore_previous_link" || restore_failed=1
+    if [ "$restore_failed" -eq 0 ]; then
+        remove_new_release || restore_failed=1
+    fi
+
+    echo "current=$(link_value "$root/current")" >&2
+    echo "previous=$(link_value "$root/previous")" >&2
+    if [ "$restore_failed" -eq 0 ]; then
+        echo "original links restored and incomplete release removed; retry is safe" >&2
+    else
+        echo "automatic recovery incomplete; keep $release and inspect both links before retrying" >&2
+    fi
+    exit 74
+}
+
+trap link_cleanup EXIT
+trap 'fail_link_switch "interrupted by INT"' INT
+trap 'fail_link_switch "interrupted by TERM"' TERM
+
+if ! ln -s "releases/$version" "$next_link"; then
+    fail_link_switch "cannot create temporary current link"
+fi
+if [ "$had_current" -eq 1 ]; then
+    if ! ln -s "$old_current_target" "$previous_link"; then
+        fail_link_switch "cannot create temporary previous link"
+    fi
+    if ! mv -Tf "$previous_link" "$root/previous"; then
+        fail_link_switch "cannot replace previous link"
+    fi
+    actual_previous="$(readlink "$root/previous" 2>/dev/null || true)"
+    if [ "$actual_previous" != "$old_current_target" ]; then
+        fail_link_switch "previous verification expected '$old_current_target', got '${actual_previous:-unreadable}'"
+    fi
+fi
+if ! mv -Tf "$next_link" "$root/current"; then
+    fail_link_switch "cannot replace current link"
+fi
+actual_current="$(readlink "$root/current" 2>/dev/null || true)"
+if [ "$actual_current" != "releases/$version" ]; then
+    fail_link_switch "current verification expected 'releases/$version', got '${actual_current:-unreadable}'"
+fi
+link_cleanup
+trap - EXIT INT TERM
+
+echo "installed release $version"
+cat "$release/SHA256SUMS"

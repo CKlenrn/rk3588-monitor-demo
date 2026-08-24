@@ -1,0 +1,150 @@
+#!/bin/sh
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+USB_PREPARE=/usr/libexec/monitor-demo-prepare-usb
+LOW_LATENCY_PATH=/sys/module/rockchip_hdmirx/parameters/low_latency
+APP_PID=/run/monitor-demo.pid
+SUPERVISOR_PID=/run/monitor-demo-supervisor.pid
+STOP_FILE=/run/monitor-demo.stop
+CRASH_LIMIT_FILE=/run/monitor-demo-crash-limit
+WINDOW_SECONDS=60
+MAX_RESTARTS=5
+RESTART_DELAY=2
+STOP_TIMEOUT_SECONDS=5
+
+app="$1"
+if [ -z "$app" ] || [ "$app" != /opt/monitor_demo/current/monitor_demo ]; then
+    echo "invalid monitor application path" >&2
+    exit 64
+fi
+if [ ! -x "$USB_PREPARE" ]; then
+    echo "$USB_PREPARE is not executable" >&2
+    exit 66
+fi
+"$USB_PREPARE"
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
+export QT_QPA_PLATFORM=wayland
+original_ld_library_path="${LD_LIBRARY_PATH:-}"
+child=
+killer=
+
+force_low_latency_off()
+{
+    if [ ! -w "$LOW_LATENCY_PATH" ] || [ ! -r "$LOW_LATENCY_PATH" ]; then
+        echo "HDMI RX low-latency control is unavailable" >&2
+        return 1
+    fi
+    printf '0\n' >"$LOW_LATENCY_PATH" || return 1
+    [ "$(cat "$LOW_LATENCY_PATH")" = N ]
+}
+
+terminate_child()
+{
+    [ -n "$child" ] || return 0
+    target_child="$child"
+
+    if kill -0 "$target_child" 2>/dev/null; then
+        kill "$target_child" 2>/dev/null || true
+        (
+            sleep "$STOP_TIMEOUT_SECONDS"
+            if [ -r "$APP_PID" ] \
+                    && [ "$(cat "$APP_PID")" = "$target_child" ] \
+                    && kill -0 "$target_child" 2>/dev/null \
+                    && tr '\000' ' ' <"/proc/$target_child/cmdline" \
+                       | grep -F "$app" >/dev/null 2>&1; then
+                kill -KILL "$target_child" 2>/dev/null || true
+            fi
+        ) &
+        killer=$!
+        wait "$target_child" 2>/dev/null || true
+        kill "$killer" 2>/dev/null || true
+        wait "$killer" 2>/dev/null || true
+        killer=
+    else
+        wait "$target_child" 2>/dev/null || true
+    fi
+    child=
+}
+
+cleanup()
+{
+    trap '' INT TERM
+    terminate_child
+    force_low_latency_off || true
+    rm -f "$APP_PID" "$SUPERVISOR_PID"
+}
+
+request_stop()
+{
+    trap '' INT TERM
+    touch "$STOP_FILE"
+    terminate_child
+}
+
+trap cleanup EXIT
+trap request_stop INT TERM
+
+window_start="$(date +%s)"
+restarts=0
+rm -f "$CRASH_LIMIT_FILE"
+
+while [ ! -e "$STOP_FILE" ]; do
+    if ! force_low_latency_off; then
+        echo "cannot establish HDMI RX safe state" >&2
+        exit 74
+    fi
+    if [ ! -x "$app" ]; then
+        echo "$app is not executable" >&2
+        exit 66
+    fi
+
+    resolved_app="$(readlink -f "$app" 2>/dev/null || true)"
+    if [ -z "$resolved_app" ] || [ ! -x "$resolved_app" ]; then
+        echo "cannot resolve executable release from $app" >&2
+        exit 66
+    fi
+    release_dir="$(dirname "$resolved_app")"
+    if [ -n "$original_ld_library_path" ]; then
+        LD_LIBRARY_PATH="$release_dir:$release_dir/CrAdapter:$original_ld_library_path"
+    else
+        LD_LIBRARY_PATH="$release_dir:$release_dir/CrAdapter"
+    fi
+    export LD_LIBRARY_PATH
+    if ! cd "$release_dir"; then
+        echo "cannot enter release directory: $release_dir" >&2
+        exit 72
+    fi
+
+    "$app" &
+    child=$!
+    echo "$child" >"$APP_PID"
+    wait "$child"
+    status=$?
+    child=
+    rm -f "$APP_PID"
+
+    if ! force_low_latency_off; then
+        echo "cannot restore HDMI RX safe state after monitor_demo exit" >&2
+        exit 74
+    fi
+
+    if [ -e "$STOP_FILE" ]; then
+        exit 0
+    fi
+
+    now="$(date +%s)"
+    if [ $((now - window_start)) -ge "$WINDOW_SECONDS" ]; then
+        window_start="$now"
+        restarts=0
+    fi
+    if [ "$restarts" -ge "$MAX_RESTARTS" ]; then
+        date '+%Y-%m-%dT%H:%M:%S%z' >"$CRASH_LIMIT_FILE"
+        echo "restart limit reached; weston remains running with a black background" >&2
+        exit 75
+    fi
+    restarts=$((restarts + 1))
+
+    echo "monitor_demo exited with status $status; restarting in ${RESTART_DELAY}s" >&2
+    sleep "$RESTART_DELAY"
+done

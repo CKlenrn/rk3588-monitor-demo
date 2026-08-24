@@ -1,0 +1,59 @@
+#!/bin/sh
+
+set -eu
+
+init_dir=/etc/init.d
+reboot_after=1
+if [ "${1:-}" = "--no-reboot" ]; then
+    reboot_after=0
+elif [ -n "${1:-}" ]; then
+    echo "usage: monitor-demo-restore-ui [--no-reboot]" >&2
+    exit 64
+fi
+
+if [ -x "$init_dir/S50monitor_demo" ]; then
+    "$init_dir/S50monitor_demo" stop || true
+elif [ -x "$init_dir/K50monitor_demo" ]; then
+    "$init_dir/K50monitor_demo" stop || true
+fi
+if [ -x "$init_dir/S49monitor_weston" ]; then
+    "$init_dir/S49monitor_weston" stop || true
+elif [ -x "$init_dir/K49monitor_weston" ]; then
+    "$init_dir/K49monitor_weston" stop || true
+fi
+
+if [ -f "$init_dir/S49monitor_weston" ]; then
+    if [ -e "$init_dir/K49monitor_weston" ]; then
+        echo "both S49monitor_weston and K49monitor_weston exist" >&2
+        exit 73
+    fi
+    mv "$init_dir/S49monitor_weston" "$init_dir/K49monitor_weston"
+fi
+if [ -f "$init_dir/S50monitor_demo" ]; then
+    if [ -e "$init_dir/K50monitor_demo" ]; then
+        echo "both S50monitor_demo and K50monitor_demo exist" >&2
+        exit 73
+    fi
+    mv "$init_dir/S50monitor_demo" "$init_dir/K50monitor_demo"
+fi
+if [ -f "$init_dir/K49weston" ] && [ ! -e "$init_dir/S49weston" ]; then
+    mv "$init_dir/K49weston" "$init_dir/S49weston"
+fi
+if [ -f "$init_dir/K50systemui" ] && [ ! -e "$init_dir/S50systemui" ]; then
+    mv "$init_dir/K50systemui" "$init_dir/S50systemui"
+fi
+sync
+
+if [ -f /opt/monitor_demo/baselines/current ]; then
+    baseline_id="$(cat /opt/monitor_demo/baselines/current)"
+    baseline="/opt/monitor_demo/baselines/$baseline_id/original"
+    cmp -s "$init_dir/S49weston" "$baseline/S49weston"
+    cmp -s "$init_dir/S50systemui" "$baseline/S50systemui"
+    cmp -s /etc/xdg/weston/weston.ini "$baseline/weston.ini"
+fi
+
+if [ "$reboot_after" -eq 1 ]; then
+    reboot
+else
+    echo "original boot names restored; reboot is still required"
+fi

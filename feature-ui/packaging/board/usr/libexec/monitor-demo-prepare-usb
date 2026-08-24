@@ -1,0 +1,77 @@
+#!/bin/sh
+
+set -eu
+
+usbfs_memory_file="${MONITOR_DEMO_USBFS_MEMORY_FILE:-/sys/module/usbcore/parameters/usbfs_memory_mb}"
+autosuspend_file="${MONITOR_DEMO_USB_AUTOSUSPEND_FILE:-/sys/module/usbcore/parameters/autosuspend}"
+usb_devices_dir="${MONITOR_DEMO_USB_DEVICES_DIR:-/sys/bus/usb/devices}"
+
+fail()
+{
+    echo "Sony USB preparation failed: $*" >&2
+    exit 74
+}
+
+read_value()
+{
+    path="$1"
+    [ -r "$path" ] || fail "parameter is not readable: $path"
+    cat "$path" 2>/dev/null || fail "cannot read parameter: $path"
+}
+
+write_value()
+{
+    name="$1"
+    path="$2"
+    value="$3"
+
+    [ -w "$path" ] || fail "$name is not writable: $path"
+    if ! printf '%s\n' "$value" >"$path"; then
+        fail "cannot set $name to $value"
+    fi
+}
+
+usbfs_memory_mb="$(read_value "$usbfs_memory_file")"
+case "$usbfs_memory_mb" in
+    ''|*[!0-9]*) fail "invalid usbfs_memory_mb value: $usbfs_memory_mb" ;;
+esac
+if [ "$usbfs_memory_mb" -lt 150 ]; then
+    write_value usbfs_memory_mb "$usbfs_memory_file" 150
+fi
+
+usbfs_memory_mb="$(read_value "$usbfs_memory_file")"
+case "$usbfs_memory_mb" in
+    ''|*[!0-9]*) fail "invalid usbfs_memory_mb value after update: $usbfs_memory_mb" ;;
+esac
+[ "$usbfs_memory_mb" -ge 150 ] \
+    || fail "usbfs_memory_mb verification failed: $usbfs_memory_mb"
+
+autosuspend="$(read_value "$autosuspend_file")"
+if [ "$autosuspend" != -1 ]; then
+    write_value autosuspend "$autosuspend_file" -1
+fi
+autosuspend="$(read_value "$autosuspend_file")"
+[ "$autosuspend" = -1 ] \
+    || fail "autosuspend verification failed: $autosuspend"
+
+[ -d "$usb_devices_dir" ] \
+    || fail "USB devices directory is missing: $usb_devices_dir"
+usb_devices_prepared=0
+for usb_device in "$usb_devices_dir"/*; do
+    [ -r "$usb_device/idVendor" ] || continue
+    power_control="$usb_device/power/control"
+    [ -e "$power_control" ] || continue
+
+    power_control_value="$(read_value "$power_control")"
+    if [ "$power_control_value" != on ]; then
+        write_value "USB power control" "$power_control" on
+    fi
+    power_control_value="$(read_value "$power_control")"
+    [ "$power_control_value" = on ] \
+        || fail "USB power control verification failed: $power_control"
+    usb_devices_prepared=$((usb_devices_prepared + 1))
+done
+[ "$usb_devices_prepared" -gt 0 ] \
+    || fail "no existing USB devices found in: $usb_devices_dir"
+
+echo "Sony USB prepared: usbfs_memory_mb=$usbfs_memory_mb autosuspend=$autosuspend existing_devices=$usb_devices_prepared"

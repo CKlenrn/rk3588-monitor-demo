@@ -1,0 +1,7 @@
+/Makefile
+/.qmake.stash
+/*.o
+/moc_*.cpp
+/moc_*.h
+/qrc_*.cpp
+/monitor_demo

@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "run as root after observing the validation on the display" >&2
+    exit 77
+fi
+
+case "${1:-}" in
+    manual-ui|isolated-weston)
+        name="$1"
+        ;;
+    *)
+        echo "usage: monitor-demo-mark-validation {manual-ui|isolated-weston}" >&2
+        exit 64
+        ;;
+esac
+
+mkdir -p /etc/monitor_demo/validation
+date '+%Y-%m-%dT%H:%M:%S%z' >"/etc/monitor_demo/validation/$name.pass"
+echo "recorded $name validation"

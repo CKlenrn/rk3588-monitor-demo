@@ -1,0 +1,54 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "run as root from the serial console" >&2
+    exit 77
+fi
+if [ "${1:-}" != "--serial-rescue-confirmed" ]; then
+    echo "usage: monitor-demo-preflight --serial-rescue-confirmed" >&2
+    exit 64
+fi
+
+stamp="$(date +%Y%m%d-%H%M%S)"
+baseline="/opt/monitor_demo/baselines/$stamp"
+if [ -e "$baseline" ]; then
+    echo "baseline already exists: $baseline" >&2
+    exit 73
+fi
+mkdir -p "$baseline/original"
+
+required_files="
+/etc/init.d/S49weston
+/etc/init.d/S50systemui
+/etc/xdg/weston/weston.ini
+/opt/ui/systemui
+/opt/ui/controlcenter
+"
+
+for source_path in $required_files; do
+    if [ ! -f "$source_path" ]; then
+        echo "required baseline file is missing: $source_path" >&2
+        exit 66
+    fi
+    sha256sum "$source_path" >>"$baseline/original-files.sha256"
+done
+
+if [ -f /opt/ui/src/apps/hdmirx ]; then
+    sha256sum /opt/ui/src/apps/hdmirx >>"$baseline/original-files.sha256"
+fi
+if [ -f /root/monitor_demo ]; then
+    sha256sum /root/monitor_demo >>"$baseline/original-files.sha256"
+fi
+
+cp -p /etc/init.d/S49weston "$baseline/original/S49weston"
+cp -p /etc/init.d/S50systemui "$baseline/original/S50systemui"
+cp -p /etc/xdg/weston/weston.ini "$baseline/original/weston.ini"
+
+printf '%s\n' "$stamp" > /opt/monitor_demo/baselines/current
+mkdir -p /etc/monitor_demo/validation
+printf '%s\n' "$stamp" > /etc/monitor_demo/validation/serial-rescue.pass
+
+echo "baseline=$baseline"
+cat "$baseline/original-files.sha256"

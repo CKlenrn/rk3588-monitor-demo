@@ -1,0 +1,90 @@
+#!/bin/sh
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+SUPERVISOR=/usr/libexec/monitor-demo-supervisor
+SUPERVISOR_PID=/run/monitor-demo-supervisor.pid
+APP_PID=/run/monitor-demo.pid
+STOP_FILE=/run/monitor-demo.stop
+LOG_FILE=/var/log/monitor-demo.log
+
+. /etc/profile
+
+is_process()
+{
+    pid_file="$1"
+    expected="$2"
+    [ -r "$pid_file" ] || return 1
+    pid="$(cat "$pid_file")"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr '\000' ' ' <"/proc/$pid/cmdline" | grep -F "$expected" >/dev/null 2>&1
+}
+
+start_monitor_demo()
+{
+    if is_process "$SUPERVISOR_PID" "$SUPERVISOR"; then
+        return 0
+    fi
+
+    if [ ! -x /opt/monitor_demo/current/monitor_demo ]; then
+        echo "/opt/monitor_demo/current/monitor_demo is not executable" >&2
+        return 1
+    fi
+
+    counter=0
+    while [ ! -S "${XDG_RUNTIME_DIR:-/run}/wayland-0" ] && [ "$counter" -lt 50 ]; do
+        sleep 0.1
+        counter=$((counter + 1))
+    done
+    if [ ! -S "${XDG_RUNTIME_DIR:-/run}/wayland-0" ]; then
+        echo "wayland-0 was not ready after 5 seconds" >&2
+        return 1
+    fi
+
+    rm -f "$STOP_FILE"
+    "$SUPERVISOR" /opt/monitor_demo/current/monitor_demo >>"$LOG_FILE" 2>&1 &
+    echo "$!" >"$SUPERVISOR_PID"
+}
+
+stop_monitor_demo()
+{
+    touch "$STOP_FILE"
+
+    if [ -r "$APP_PID" ]; then
+        app_pid="$(cat "$APP_PID")"
+        if kill -0 "$app_pid" 2>/dev/null \
+                && tr '\000' ' ' <"/proc/$app_pid/cmdline" \
+                   | grep -F '/opt/monitor_demo/current/monitor_demo' >/dev/null 2>&1; then
+            kill "$app_pid" 2>/dev/null || true
+        fi
+    fi
+
+    if is_process "$SUPERVISOR_PID" "$SUPERVISOR"; then
+        supervisor_pid="$(cat "$SUPERVISOR_PID")"
+        kill "$supervisor_pid" 2>/dev/null || true
+    fi
+
+    counter=0
+    while [ -r "$SUPERVISOR_PID" ] && [ "$counter" -lt 50 ]; do
+        sleep 0.1
+        counter=$((counter + 1))
+    done
+    rm -f "$SUPERVISOR_PID" "$APP_PID"
+}
+
+case "$1" in
+    start)
+        start_monitor_demo
+        ;;
+    stop)
+        stop_monitor_demo
+        ;;
+    restart|reload)
+        stop_monitor_demo
+        start_monitor_demo
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac
